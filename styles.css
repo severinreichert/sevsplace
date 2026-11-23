@@ -1,0 +1,30 @@
+/* Stil der Startseite. Die Anwendungen unter apps/ sind eigenständig und laden diese Datei nicht. */
+:root {
+    --ink: #1c2733;
+    --muted: #5d6b7a;
+    --paper: #eef2f6;
+    --line: #c4cfdb;
+    --accent: #2d6cb5;
+}
+
+body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+main {
+    max-width: 44rem;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+}
+
+h1 { margin: 0 0 .25rem; }
+h2 { margin: 2rem 0 .5rem; font-size: 1.15rem; }
+
+.apps { list-style: none; margin: 0; padding: 0; }
+.apps li { padding: .75rem 0; border-top: 1px solid var(--line); }
+.apps li:last-child { border-bottom: 1px solid var(--line); }
+.apps a { font-weight: 650; color: var(--accent); }
+.apps span { display: block; color: var(--muted); font-size: .95rem; max-width: 60ch; }
