@@ -42,11 +42,11 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
       ['010001xx', 'movs Rx', 'Rx → Rx (setzt die Flags neu)'],
       ['010010nn', 'NOP', 'Keine Operation (nn ohne Bedeutung)'],
       ['010011nn', 'HALT', 'Programm beenden (nn ohne Bedeutung)'],
-      ['0101aaaa', 'jmp #addr', 'Springe zu Adresse aaaa'],
-      ['0110aaaa', 'jmp_n #addr', 'Springe zu Adresse aaaa, wenn Flag N gesetzt ist'],
-      ['0111aaaa', 'jmp_o #addr', 'Springe zu Adresse aaaa, wenn Flag O gesetzt ist'],
-      ['10xxaaaa', 'ldr Rx, #addr', 'RAM[aaaa] → Rx'],
-      ['11xxaaaa', 'str Rx, #addr', 'Rx → RAM[aaaa]']
+      ['0101aaaa', 'jmp addr', 'Springe zu Adresse aaaa'],
+      ['0110aaaa', 'jmp_n addr', 'Springe zu Adresse aaaa, wenn Flag N gesetzt ist'],
+      ['0111aaaa', 'jmp_o addr', 'Springe zu Adresse aaaa, wenn Flag O gesetzt ist'],
+      ['10xxaaaa', 'ldr Rx, addr', 'RAM[aaaa] → Rx'],
+      ['11xxaaaa', 'str Rx, addr', 'Rx → RAM[aaaa]']
     ];
 
     function pad(s, n) { s = String(s); while (s.length < n) { s = '0' + s; } return s; }
@@ -96,11 +96,11 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
           parts.push('nn = ' + bits(b & 3, 2) + ' (ohne Bedeutung)');
           break;
         case 'addr':
-          d.text = d.label + ' #' + d.a;
+          d.text = d.label + ' ' + d.a;
           parts.push('Adresse = ' + bits(d.a, 4) + ' → ' + d.a);
           break;
         default: // ra
-          d.text = d.label + ' R' + d.x + ', #' + d.a;
+          d.text = d.label + ' R' + d.x + ', ' + d.a;
           parts.push('x = ' + bits(d.x, 2) + ' → R' + d.x, 'Adresse = ' + bits(d.a, 4) + ' → ' + d.a);
       }
       d.explain = parts.join(', ');
@@ -152,7 +152,6 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
     /* ---------------- Assembler ---------------- */
     function parseNumber(tok) {
       tok = String(tok).trim();
-      if (tok.charAt(0) === '#') { tok = tok.slice(1).trim(); }
       var neg = false, v;
       if (tok.charAt(0) === '-') { neg = true; tok = tok.slice(1); }
       if (/^0x[0-9a-f]+$/i.test(tok)) { v = parseInt(tok.slice(2), 16); }
@@ -164,15 +163,68 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
 
     function trim(s) { return s.trim(); }
 
+    // Entfernt Kommentare und liefert den Code zeilenweise (die Zeilennummern bleiben erhalten).
+    // Kommentare: "#" bis zum Zeilenende oder Blockkommentare zwischen Slash-Stern und Stern-Slash.
+    // Die alten Schreibweisen (";", "//" und "#" vor Zahlen) werden mit einem Hinweis als Fehler gemeldet.
+    function prepare(src) {
+      src = String(src || '').replace(/\r\n?/g, '\n');
+      var texts = [''], errors = [], oldComment = [], hashNumber = [];
+      var line = 1, i = 0, inBlock = false, blockLine = 0, c, c2, end;
+
+      while (i < src.length) {
+        c = src.charAt(i); c2 = src.substr(i, 2);
+        if (inBlock) {
+          if (c2 === '*/') { inBlock = false; texts[line - 1] += ' '; i += 2; }
+          else { if (c === '\n') { line++; texts.push(''); } i++; }
+          continue;
+        }
+        if (c2 === '/*') { inBlock = true; blockLine = line; i += 2; continue; }
+        if (c === '\n') { line++; texts.push(''); i++; continue; }
+        end = src.indexOf('\n', i);
+        if (end < 0) { end = src.length; }
+        if (c === '#') {
+          var rest = src.slice(i + 1, end), code = texts[line - 1].trim();
+          if (/^\d/.test(rest) && /(,|\b(jmp|jmp_n|jmp_o|jmpn|jmpo)|\.(org|byte|db))$/i.test(code)) {
+            hashNumber.push(line);   // altes "#13": Zahl trotzdem weiterlesen, damit keine Folgefehler entstehen
+            i++;
+            continue;
+          }
+          i = end;
+          continue;
+        }
+        if (c === ';' || c2 === '//') { oldComment.push(line); i = end; continue; }
+        texts[line - 1] += c;
+        i++;
+      }
+
+      function lineList(a) {
+        var u = a.filter(function (v, k) { return a.indexOf(v) === k; });
+        return (u.length > 1 ? 'Zeilen ' : 'Zeile ') + u.join(', ');
+      }
+      if (inBlock) {
+        errors.push({ line: blockLine, message: 'Zeile ' + blockLine + ': Der Kommentar „/*“ wird nie mit „*/“ geschlossen.' });
+      }
+      if (hashNumber.length) {
+        errors.push({ line: hashNumber[0], message: lineList(hashNumber) +
+          ': Zahlen und Adressen werden ohne „#“ geschrieben (Dezimalzahl, 0x… oder 0b…). „#“ beginnt einen Kommentar.' });
+      }
+      if (oldComment.length) {
+        errors.push({ line: oldComment[0], message: lineList(oldComment) +
+          ': Kommentare beginnen mit „#“ (bis zum Zeilenende) oder stehen zwischen /* und */. „;“ und „//“ sind nicht mehr erlaubt.' });
+      }
+      return { texts: texts, errors: errors };
+    }
+
     function assemble(src) {
-      var lines = String(src || '').split(/\r?\n/);
-      var errors = [], labels = {}, items = [], addr = 0, i, m, text;
+      var prep = prepare(src);
+      var lines = prep.texts;
+      var errors = prep.errors.slice(), labels = {}, items = [], addr = 0, i, m, text;
 
       function err(line, msg) { errors.push({ line: line, message: 'Zeile ' + line + ': ' + msg }); }
 
       for (i = 0; i < lines.length; i++) {
         var ln = i + 1;
-        text = lines[i].replace(/(;|\/\/).*$/, '').trim();
+        text = lines[i].trim();
 
         while ((m = /^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*/.exec(text))) {
           var lname = m[1].toLowerCase();
@@ -230,9 +282,12 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
       function parseAddr(tok, ln) {
         var v = parseNumber(tok);
         if (v === null) {
-          var key = tok.replace(/^#/, '').trim().toLowerCase();
+          var key = tok.trim().toLowerCase();
           if (labels.hasOwnProperty(key)) { v = labels[key]; }
-          else { err(ln, '„' + tok + '“ ist weder eine Adresse noch ein bekanntes Label.'); return null; }
+          else {
+            err(ln, '„' + tok + '“ ist keine gültige Adresse (erlaubt: Dezimalzahl, 0x… oder 0b…) und kein bekanntes Label.');
+            return null;
+          }
         }
         if (v < 0 || v >= MEM_SIZE) { err(ln, 'Die Adresse „' + tok + '“ liegt außerhalb von 0 bis 15.'); return null; }
         return v;
@@ -270,6 +325,7 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
         mem[it.addr] = val;
       });
 
+      errors.sort(function (a, b) { return a.line - b.line; });
       return { mem: mem, errors: errors, used: usedCount };
     }
 
@@ -282,7 +338,7 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
         var b = mem[i] & 255, d = decode(b);
         var canonical = encode(d.name, d.x, d.y, d.a) === b;
         var code = canonical ? d.text : '.byte 0x' + pad(b.toString(16).toUpperCase(), 2);
-        out.push(padRight(code, 18) + '; ' + pad(i, 2) + ': ' + bits(b, 8));
+        out.push(padRight(code, 18) + '# ' + pad(i, 2) + ': ' + bits(b, 8));
       }
       return out.join('\n');
     }
@@ -505,7 +561,7 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
     return {
       MEM_SIZE: MEM_SIZE, ISA: ISA, ALU_LABEL: ALU_LABEL,
       decode: decode, encode: encode, alu: alu,
-      assemble: assemble, disassemble: disassemble, parseNumber: parseNumber,
+      assemble: assemble, disassemble: disassemble, parseNumber: parseNumber, prepare: prepare,
       bits: bits, pad: pad, CPU: CPU
     };
   })();
@@ -514,21 +570,22 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
    * Oberfläche
    * ===================================================================== */
   var DEFAULT_ASM = [
-    '; Beispiel: 4 x 3 durch wiederholte Addition',
-    'ldr R0, #13     ; Zähler laden',
-    'ldr R2, #14     ; Summand laden',
-    'sub R1, R1      ; R1 = 0 (Summe)',
+    '/* Beispiel: 4 x 3 durch wiederholte Addition',
+    '   R0 = Zähler, R1 = Summe, R2 = Summand */',
+    'ldr R0, 13      # Zähler laden',
+    'ldr R2, 14      # Summand laden',
+    'sub R1, R1      # R1 = 0 (Summe)',
     'loop:',
-    'add R1, R2      ; Summe += Summand',
-    'dec R0          ; Zähler -= 1',
-    'jmp_n ende      ; Zähler < 0 ? Dann fertig',
+    'add R1, R2      # Summe += Summand',
+    'dec R0          # Zähler -= 1',
+    'jmp_n ende      # Zähler < 0 ? Dann fertig',
     'jmp loop',
     'ende:',
-    'str R1, #15     ; Ergebnis speichern',
+    'str R1, 15      # Ergebnis speichern',
     'HALT',
     '.org 13',
-    '.byte 3         ; Zähler (3 ergibt 4 Durchläufe)',
-    '.byte 3         ; Summand'
+    '.byte 3         # Zähler (3 ergibt 4 Durchläufe)',
+    '.byte 3         # Summand'
   ].join('\n');
 
   var FORMATS = [
@@ -677,6 +734,29 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
   };
 
   /* ---------------- Aufbau ---------------- */
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+
+  /* V-förmiges ALU-Symbol: zwei Eingänge oben, Ausgang an der unteren Spitze */
+  function aluShape() {
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'cpuv-alu-shape');
+    svg.setAttribute('viewBox', '0 0 100 100');
+    svg.setAttribute('preserveAspectRatio', 'none');
+    svg.setAttribute('aria-hidden', 'true');
+    var poly = document.createElementNS(SVG_NS, 'polygon');
+    poly.setAttribute('points', '0.5,0.5 38,0.5 50,26 62,0.5 99.5,0.5 82,99.5 18,99.5');
+    svg.appendChild(poly);
+    return svg;
+  }
+
+  function flagItem(letter, text, title) {
+    var item = el('span', 'cpuv-flag-item');
+    var flag = el('span', 'cpuv-flag', letter, { title: title });
+    item.appendChild(flag);
+    item.appendChild(el('span', 'cpuv-flag-text', text));
+    return { item: item, flag: flag };
+  }
+
   C.prototype.build = function (root) {
     var self = this;
 
@@ -735,12 +815,13 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
     var cpuFrame = el('section', 'cpuv-frame cpuv-cpu', null, { 'aria-label': 'Prozessor' });
     cpuFrame.appendChild(el('h3', 'cpuv-title', 'Prozessor'));
 
-    var ctl = el('div', 'cpuv-group');
-    ctl.appendChild(el('h4', 'cpuv-subtitle', 'Steuerwerk'));
+    /* Steuerwerk: ein zusammenhängender Block */
+    var ctl = el('section', 'cpuv-block cpuv-hue-control cpuv-control', null, { 'aria-label': 'Steuerwerk' });
+    ctl.appendChild(el('h4', 'cpuv-block-title', 'Steuerwerk'));
     var ctlGrid = el('div', 'cpuv-grid cpuv-grid-2');
-    this.nodes.pc = box('pc', 'PC', 'Programmzähler, 4 Bit');
-    this.nodes.ar = box('ar', 'AR', 'Adressregister, 4 Bit');
-    this.nodes.ir = box('ir', 'IR', 'Instruktionsregister, 8 Bit');
+    this.nodes.pc = box('pc', 'Programmzähler (PC)', '4 Bit');
+    this.nodes.ar = box('ar', 'Adressregister (AR)', '4 Bit');
+    this.nodes.ir = box('ir', 'Instruktionsregister (IR)', '8 Bit');
     var dec = el('div', 'cpuv-box cpuv-dec');
     dec.setAttribute('data-key', 'dec');
     dec.appendChild(el('span', 'cpuv-lab', 'Decoder'));
@@ -756,59 +837,71 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
     ctl.appendChild(ctlGrid);
     cpuFrame.appendChild(ctl);
 
-    var regs = el('div', 'cpuv-group');
-    regs.appendChild(el('h4', 'cpuv-subtitle', 'Register (je 8 Bit)'));
-    var regGrid = el('div', 'cpuv-grid cpuv-grid-4');
+    var body = el('div', 'cpuv-cpu-body');
+
+    /* Registersatz */
+    var regs = el('section', 'cpuv-block cpuv-hue-regs cpuv-regs', null, { 'aria-label': 'Registersatz' });
+    regs.appendChild(el('h4', 'cpuv-block-title', 'Registersatz (je 8 Bit)'));
+    var regGrid = el('div', 'cpuv-grid cpuv-grid-regs');
     for (var r = 0; r < 4; r++) {
-      this.nodes['r' + r] = box('r' + r, 'R' + r, '');
+      this.nodes['r' + r] = box('r' + r, 'Register ' + r + ' (R' + r + ')', '');
       regGrid.appendChild(this.nodes['r' + r]);
     }
     regs.appendChild(regGrid);
-    cpuFrame.appendChild(regs);
+    body.appendChild(regs);
 
-    var aluGroup = el('div', 'cpuv-group');
-    aluGroup.appendChild(el('h4', 'cpuv-subtitle', 'ALU'));
+    /* ALU im V-Format */
+    var aluGroup = el('section', 'cpuv-block cpuv-hue-alu cpuv-alu-block', null, { 'aria-label': 'Arithmetisch-logische Einheit' });
+    aluGroup.appendChild(el('h4', 'cpuv-block-title', 'Arithmetisch-logische Einheit (ALU)'));
     var aluBox = el('div', 'cpuv-alu');
     this.nodes.alu = aluBox;
-    this.nodes.aluA = box('aluA', 'A', '');
-    this.nodes.aluB = box('aluB', 'B', '');
+    aluBox.appendChild(aluShape());
+    this.nodes.aluA = box('aluA', 'Eingang A', '');
+    this.nodes.aluB = box('aluB', 'Eingang B', '');
     this.nodes.aluR = box('aluR', 'Ergebnis', '');
-    this.nodes.aluOp = el('output', 'cpuv-aluop', '–');
-    var aluIn = el('div', 'cpuv-alu-in');
-    aluIn.appendChild(this.nodes.aluA);
-    aluIn.appendChild(this.nodes.aluB);
-    aluBox.appendChild(aluIn);
-    var aluMid = el('div', 'cpuv-alu-mid');
+    this.nodes.aluA.classList.add('cpuv-alu-a');
+    this.nodes.aluB.classList.add('cpuv-alu-b');
+    this.nodes.aluR.classList.add('cpuv-alu-r');
+    var aluMid = el('div', 'cpuv-alu-op');
     aluMid.appendChild(el('span', 'cpuv-sub', 'Operation'));
+    this.nodes.aluOp = el('output', 'cpuv-aluop', '–');
     aluMid.appendChild(this.nodes.aluOp);
+    aluBox.appendChild(this.nodes.aluA);
+    aluBox.appendChild(this.nodes.aluB);
     aluBox.appendChild(aluMid);
-    var aluOut = el('div', 'cpuv-alu-out');
-    aluOut.appendChild(this.nodes.aluR);
+    aluBox.appendChild(this.nodes.aluR);
+    aluGroup.appendChild(aluBox);
+
     var flags = el('div', 'cpuv-flags');
     this.nodes.flags = flags;
-    this.nodes.flagN = el('span', 'cpuv-flag', 'N', { title: 'Negativ: höchstes Bit des Ergebnisses' });
-    this.nodes.flagO = el('span', 'cpuv-flag', 'O', { title: 'Overflow: Überlauf im Zweierkomplement' });
-    flags.appendChild(el('span', 'cpuv-sub', 'Flags'));
-    flags.appendChild(this.nodes.flagN);
-    flags.appendChild(this.nodes.flagO);
-    aluOut.appendChild(flags);
-    aluBox.appendChild(aluOut);
-    aluGroup.appendChild(aluBox);
-    cpuFrame.appendChild(aluGroup);
+    var fn = flagItem('N', 'Negativ-Flag (N)', 'Negativ: höchstes Bit des Ergebnisses');
+    var fo = flagItem('O', 'Überlauf-Flag (O)', 'Overflow: Überlauf im Zweierkomplement');
+    this.nodes.flagN = fn.flag;
+    this.nodes.flagO = fo.flag;
+    flags.appendChild(el('span', 'cpuv-flags-title', 'Flags'));
+    flags.appendChild(fn.item);
+    flags.appendChild(fo.item);
+    aluGroup.appendChild(flags);
+    body.appendChild(aluGroup);
+    cpuFrame.appendChild(body);
 
     var bus = el('div', 'cpuv-bus', null, { 'aria-hidden': 'true' });
     bus.appendChild(el('span', 'cpuv-bus-label', 'Bus'));
     this.busEl = bus;
 
-    var ramFrame = el('section', 'cpuv-frame cpuv-ram', null, { 'aria-label': 'Arbeitsspeicher' });
+    /* Arbeitsspeicher */
+    var ramFrame = el('section', 'cpuv-block cpuv-hue-ram cpuv-ram', null, { 'aria-label': 'Arbeitsspeicher' });
     var ramHead = el('div', 'cpuv-ram-head');
     ramHead.appendChild(el('h3', 'cpuv-title', 'Arbeitsspeicher (RAM), 16 × 8 Bit'));
     if (this.opts.memoryEditable) {
       var ramBtns = el('div', 'cpuv-ram-btns');
       this.btn.clear = el('button', 'cpuv-btn cpuv-btn-small', 'Speicher leeren', { type: 'button' });
-      this.btn.restore = el('button', 'cpuv-btn cpuv-btn-small', 'Startprogramm laden', { type: 'button' });
       ramBtns.appendChild(this.btn.clear);
-      ramBtns.appendChild(this.btn.restore);
+      if (!this.opts.showAssembler) {
+        // ohne Assembler-Block bleibt das Zurückholen des Startprogramms hier erreichbar
+        this.btn.startup = el('button', 'cpuv-btn cpuv-btn-small', 'Startprogramm laden', { type: 'button' });
+        ramBtns.appendChild(this.btn.startup);
+      }
       ramHead.appendChild(ramBtns);
     }
     ramFrame.appendChild(ramHead);
@@ -823,6 +916,13 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
     for (var i = 0; i < Core.MEM_SIZE; i++) {
       this.rows.push(this.buildRow(i, ramFrame));
     }
+
+    if (this.opts.showAssembler) {
+      var ramFoot = el('div', 'cpuv-ram-foot');
+      this.btn.dump = el('button', 'cpuv-btn', 'Speicher als Assembler anzeigen', { type: 'button' });
+      ramFoot.appendChild(this.btn.dump);
+      ramFrame.appendChild(ramFoot);
+    }
     this.ramMsg = el('p', 'cpuv-ram-msg', '', { role: 'status' });
     ramFrame.appendChild(this.ramMsg);
 
@@ -831,11 +931,14 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
     diagram.appendChild(ramFrame);
     root.appendChild(diagram);
 
-    /* Assembler */
-    if (this.opts.showAssembler) { this.buildAssembler(root); }
-
-    /* Referenz */
-    this.buildReference(root);
+    /* Assembler (mit aufklappbarer Befehlssatz-Referenz) */
+    if (this.opts.showAssembler) {
+      this.buildAssembler(root);
+    } else {
+      var refOnly = el('section', 'cpuv-block cpuv-hue-asm cpuv-asm');
+      refOnly.appendChild(this.buildReference());
+      root.appendChild(refOnly);
+    }
 
     /* Ereignisse */
     this.btn.step.addEventListener('click', function () { if (self.canInteract()) { self.doStep(); } });
@@ -845,7 +948,7 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
     this.speedInput.addEventListener('input', function () { self.speed = +self.speedInput.value; });
     this.fmtSelect.addEventListener('change', function () {
       self.setFormatInternal(self.fmtSelect.value);
-      self.ramMsg.textContent = '';
+      self.setRamMsg('');
       self.render();
     });
     if (this.btn.clear) {
@@ -854,13 +957,9 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
         self.resetCPU();
         self.setNarration('Der Speicher wurde geleert.');
       });
-      this.btn.restore.addEventListener('click', function () {
-        if (self.asmArea) { self.asmArea.value = self.opts.assembly; }
-        self.applyInitialProgram();
-        self.resetCPU();
-        self.setNarration('Das Startprogramm wurde in den Speicher geladen.');
-      });
     }
+    if (this.btn.startup) { this.btn.startup.addEventListener('click', function () { self.restoreStartProgram(); }); }
+    if (this.btn.dump) { this.btn.dump.addEventListener('click', function () { self.dumpToAssembler(); }); }
   };
 
   C.prototype.buildRow = function (i, parent) {
@@ -889,10 +988,10 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
       var v = parseInput(cell.value, self.format);
       if (v === null) {
         cell.classList.add('is-invalid');
-        self.ramMsg.textContent = 'Ungültige Eingabe in Adresse ' + i + '. ' + FORMAT_HINT[self.format] + '.';
+        self.setRamMsg('Ungültige Eingabe in Adresse ' + i + '. ' + FORMAT_HINT[self.format] + '.', 'error');
         setTimeout(function () { cell.classList.remove('is-invalid'); }, 900);
       } else {
-        self.ramMsg.textContent = '';
+        self.setRamMsg('');
         self.cpu.mem[i] = v;
       }
       cell.value = self.fmt8(self.cpu.mem[i]);
@@ -903,10 +1002,17 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
     return { root: row, addr: addr, cell: cell, dis: dis, tags: tags };
   };
 
+  C.prototype.setRamMsg = function (text, kind) {
+    this.ramMsg.textContent = text;
+    this.ramMsg.className = 'cpuv-ram-msg' + (kind ? ' is-' + kind : '');
+  };
+
   C.prototype.buildAssembler = function (root) {
     var self = this;
-    var sec = el('section', 'cpuv-asm');
+    var sec = el('section', 'cpuv-block cpuv-hue-asm cpuv-asm', null, { 'aria-label': 'Assembler' });
     sec.appendChild(el('h3', 'cpuv-title', 'Assembler-Programm'));
+    sec.appendChild(this.buildReference());
+
     this.asmArea = el('textarea', 'cpuv-asm-text', null, {
       rows: '13', spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off',
       'aria-label': 'Assembler-Programm'
@@ -916,9 +1022,9 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
 
     var btns = el('div', 'cpuv-asm-btns');
     var load = el('button', 'cpuv-btn cpuv-btn-primary', 'In den Speicher laden', { type: 'button' });
-    var dump = el('button', 'cpuv-btn', 'Speicher als Assembler anzeigen', { type: 'button' });
+    this.btn.startup = el('button', 'cpuv-btn', 'Startprogramm laden', { type: 'button' });
     btns.appendChild(load);
-    btns.appendChild(dump);
+    btns.appendChild(this.btn.startup);
     sec.appendChild(btns);
 
     this.asmMsg = el('div', 'cpuv-asm-msg', '', { role: 'status' });
@@ -926,13 +1032,10 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
     root.appendChild(sec);
 
     load.addEventListener('click', function () { self.loadAssembly(); });
-    dump.addEventListener('click', function () {
-      self.asmArea.value = Core.disassemble(self.cpu.mem);
-      self.showAsmMessage('ok', 'Der aktuelle Speicherinhalt wird als Befehlsfolge dargestellt. Zellen, die Daten enthalten, erscheinen dabei ebenfalls als Befehle.', []);
-    });
   };
 
-  C.prototype.buildReference = function (root) {
+  C.prototype.buildReference = function () {
+    var self = this;
     var det = el('details', 'cpuv-ref');
     det.appendChild(el('summary', null, 'Befehlssatz und Assembler-Syntax'));
     var wrap = el('div', 'cpuv-ref-wrap');
@@ -954,11 +1057,12 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
       'Flag N wird gesetzt, wenn das höchste Bit des ALU-Ergebnisses 1 ist. Flag O wird gesetzt, wenn die Rechnung im Zweierkomplement überläuft. ' +
       'Nur ALU-Befehle ändern die Flags.'));
     det.appendChild(el('p', null,
-      'Syntax: ein Befehl pro Zeile, Kommentare nach „;“, Labels als „name:“, Adressen mit oder ohne „#“ (dezimal, 0x… oder 0b…). ' +
+      'Syntax: ein Befehl pro Zeile. Kommentare beginnen mit „#“ (bis zum Zeilenende) oder stehen zwischen /* und */ (auch über mehrere Zeilen). ' +
+      'Adressen und Zahlen schreibst du als Dezimalzahl (13), hexadezimal (0xD) oder binär (0b1101), ohne „#“. ' +
+      'Sprungziele können auch Labels sein: „name:“ definiert eins, „jmp name“ springt dorthin. ' +
       '„.org n“ setzt die nächste Speicheradresse, „.byte wert, …“ legt Datenbytes ab.'));
-    root.appendChild(det);
-    var self = this;
     det.addEventListener('toggle', function () { self.trigger('resize'); });
+    return det;
   };
 
   /* ---------------- Assembler-Anbindung ---------------- */
@@ -985,6 +1089,20 @@ H5P.CPUVisualizer = (function ($, EventDispatcher) {
       if (this.asmMsg) { this.asmMsg.innerHTML = ''; this.asmMsg.className = 'cpuv-asm-msg'; }
     }
     if (!this.startMem) { this.startMem = this.cpu.mem.slice(); }
+  };
+
+  C.prototype.restoreStartProgram = function () {
+    if (this.asmArea) { this.asmArea.value = this.opts.assembly; }
+    this.applyInitialProgram();
+    this.resetCPU();
+    this.setNarration('Das Startprogramm wurde in den Speicher geladen.');
+  };
+
+  C.prototype.dumpToAssembler = function () {
+    if (!this.asmArea) { return; }
+    this.asmArea.value = Core.disassemble(this.cpu.mem);
+    this.showAsmMessage('ok', 'Der aktuelle Speicherinhalt wird als Befehlsfolge dargestellt. Zellen, die Daten enthalten, erscheinen dabei ebenfalls als Befehle.', []);
+    this.setRamMsg('Der Speicherinhalt steht jetzt im Assembler-Editor.', 'ok');
   };
 
   C.prototype.loadAssembly = function () {
