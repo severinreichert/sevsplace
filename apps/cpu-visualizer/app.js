@@ -8,7 +8,7 @@
                               das Zeichen "#" beginnt in einer Adresse ein Fragment und geht dort nicht. */
 (function () {
   // Parameter selbst lesen: Ein "+" bleibt ein Pluszeichen (URLSearchParams würde es zum Leerzeichen machen),
-  // Leerzeichen und Umlaute dürfen direkt geschrieben werden, ein "&" im Text als %26.
+  // Leerzeichen und Umlaute dürfen direkt geschrieben werden. Die Zeichen & # % sind in Texten nicht möglich (siehe README).
   var params = {};
   window.location.search.replace(/^\?/, '').split('&').forEach(function (pair) {
     if (!pair) { return; }

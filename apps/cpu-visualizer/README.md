@@ -43,7 +43,7 @@ HALT
 | `task` | Aufgabentext über dem Prozessor | `?task=Berechne 3+4` |
 | `asm` | Startprogramm, Zeilen mit `\|` getrennt | `?asm=ldr R0, 13 \| inc R0 \| HALT \| .org 13 \| .byte 5` |
 
-Mehrere Parameter mit `&` verbinden. Leerzeichen, Umlaute und `+` können direkt geschrieben werden; ein `&` im Text als `%26`. So kann jede Moodle-Aktivität eine eigene Aufgabe bekommen,
+Mehrere Parameter mit `&` verbinden. Leerzeichen, Umlaute und `+` können direkt geschrieben werden. Die Zeichen `&`, `#` und `%` lassen sich in Texten nicht übergeben: `&` trennt Parameter, `#` beginnt ein Fragment, und der H5P Iframe Embedder wandelt `%` in `%25` um (ein `%26` käme als Text „%26“ an). So kann jede Moodle-Aktivität eine eigene Aufgabe bekommen,
 ohne dass die Seite neu veröffentlicht werden muss.
 
 Im Parameter `asm` funktionieren `#`-Kommentare nicht, weil `#` in einer Adresse ein Fragment einleitet.
